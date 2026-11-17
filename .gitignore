@@ -1,0 +1,6 @@
+# macOS
+.DS_Store
+
+# 与 BEX 无关的第三方源码树（MultiChain, GPLv3, 2022），单独存放，不纳入本仓库。
+# 如需纳入，删除下面这一行再 git add 即可。
+multichain-master/

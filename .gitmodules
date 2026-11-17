@@ -1,0 +1,6 @@
+[submodule "bex-core/lib/halmos-cheatcodes"]
+	path = bex-core/lib/halmos-cheatcodes
+	url = https://github.com/a16z/halmos-cheatcodes
+[submodule "bex-core/lib/forge-std"]
+	path = bex-core/lib/forge-std
+	url = https://github.com/foundry-rs/forge-std

@@ -1,0 +1,20 @@
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+test = "test"
+script = "script"
+solc_version = "0.8.24"
+evm_version = "shanghai"
+optimizer = true
+optimizer_runs = 200
+# Settlement 的 settle() 局部变量较多，需要 IR 管线才能编译通过；
+# 这也是上线版本的推荐设置（与 optimize 组合使用）。
+via_ir = true
+# Strictly read-only access to public Beacon consensus test vectors.
+fs_permissions = [{ access = "read", path = "./test/vectors" }]
+
+[fmt]
+line_length = 120
+tab_width = 4
+bracket_spacing = true
