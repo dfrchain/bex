@@ -4,8 +4,8 @@ pragma solidity 0.8.24;
 import { Test } from "forge-std/Test.sol";
 import { PaymentReceiptSink } from "src/PaymentReceiptSink.sol";
 
-/// @notice 恶意 ERC-20：在 `transferFrom` 里回调 `PaymentReceiptSink.pay`，
-///         想在原调用完成前插队第二笔付款。
+/// @notice Malicious ERC-20: calls back into `PaymentReceiptSink.pay` from `transferFrom`,
+///         trying to cut in a second payment before the original call finishes.
 contract ReentrantPaymentToken {
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
@@ -19,8 +19,8 @@ contract ReentrantPaymentToken {
     function configure(address target_, bytes calldata innerCalldata_) external {
         target = target_;
         innerCalldata = innerCalldata_;
-        // 让代币合约自身有余额且已授权 sink，使内层 pay 在**没有锁**时本可成功。
-        // 否则内层会因余额不足而 revert，测试就会变成假阳性。
+        // Give the token contract itself a balance and sink approval, so the inner pay could have succeeded **without the lock**.
+        // Otherwise the inner call would revert for insufficient balance and the test would become a false positive.
         balanceOf[address(this)] = 1_000_000;
         allowance[address(this)][target_] = type(uint256).max;
     }
@@ -41,7 +41,7 @@ contract ReentrantPaymentToken {
         balanceOf[from] -= amount;
         balanceOf[to] += amount;
 
-        // 只在最外层转账时尝试一次重入，避免无限递归淹没断言。
+        // Only attempt reentrancy once, on the outermost transfer, to avoid infinite recursion drowning the assertions.
         if (target != address(0) && !_entered) {
             _entered = true;
             reentryAttempted = true;
@@ -53,9 +53,9 @@ contract ReentrantPaymentToken {
     }
 }
 
-/// @notice 回归：`PaymentReceiptSink.pay` 的重入锁必须真的挡住回调型代币。
-/// @dev 攻击模型：恶意代币在 `transferFrom` 回调 `pay`。锁必须让内层调用以
-///      `Reentrant` 失败，外层付款照常成功且回执只写一次。
+/// @notice Regression: the reentrancy lock in `PaymentReceiptSink.pay` must actually block callback-style tokens.
+/// @dev Attack model: a malicious token calls back into `pay` from `transferFrom`. The lock must make the inner call fail with
+///      `Reentrant`, while the outer payment still succeeds and the receipt is written only once.
 contract PaymentReceiptSinkReentrancyTest is Test {
     function _oneAsset(address a) internal pure returns (address[] memory assets) {
         assets = new address[](1);
@@ -70,7 +70,7 @@ contract PaymentReceiptSinkReentrancyTest is Test {
         token.mint(address(this), 1_000_000);
         token.approve(address(sink), type(uint256).max);
 
-        // 内层回调：换一个 orderId 再调一次 pay，试图在原调用未收尾时插队。
+        // Inner callback: call pay once more with a different orderId, trying to cut in before the original call finishes.
         bytes memory inner = abi.encodeWithSignature(
             "pay(uint256,uint256,uint64,address,address,uint256)",
             1,

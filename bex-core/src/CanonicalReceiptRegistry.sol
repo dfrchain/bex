@@ -4,20 +4,20 @@ pragma solidity 0.8.24;
 import { ICanonicalReceiptSource } from "./interfaces/ICanonicalReceiptSource.sol";
 import { ReceiptChainDomain } from "./libraries/ReceiptChainDomain.sol";
 
-/// @title Canonical 回执定义注册表（源链）
-/// @notice 第三轮外部评审 Critical 修复（RECEIPT-CANONICALIZATION-001）：
-///         **源链独立重算 receiptHash，不接受证明者提交的值。**
+/// @title Canonical receipt definition registry (source chain)
+/// @notice Critical fix from the third external review round (RECEIPT-CANONICALIZATION-001):
+///         **The source chain recomputes receiptHash independently and never accepts a prover-submitted value.**
 ///
-///         设计要点：
-///         * 回执上下文（epoch / orderId / 目标链 / sink / 资产 / 金额 / 收款人 / solver）
-///           在批次阶段由源链写入，来源是**已锁定的订单与市场配置**，不是证明者 calldata；
-///         * 写入后 **immutable**（`AlreadySet` 拒绝重复登记），证明者无法事后替换；
-///         * `receiptHashOf` 的编码与目标链 `PaymentReceiptSink.receiptHashOf` 逐字段一致。
+///         Key design points:
+///         * Receipt context (epoch / orderId / destination chain / sink / asset / amount / recipient / solver)
+///           written by the source chain at batch time from **locked orders and market configuration**, not from prover calldata;
+///         * Immutable once written (`AlreadySet` rejects duplicate registration), so a prover cannot replace it afterwards;
+///         * The encoding of `receiptHashOf` matches the destination-chain `PaymentReceiptSink.receiptHashOf` field for field.
 ///
-/// @dev 为什么 asset 必须来自这里而不是 proof：balance delta 判断不了代币的经济价值。
-///      攻击者可部署 FakeUSDC（balanceOf 随便返回、transferFrom 随便成功），
-///      sink 会"认为已入账"。因此 asset 必须是协议认可的市场 canonical 资产。
-/// @dev 边界：本合约只**定义**回执，不验证目标链状态，也不释放资金。
+/// @dev Why asset must come from here and not from the proof: a balance delta cannot tell a token's economic value.
+///      An attacker can deploy a FakeUSDC (balanceOf returns anything, transferFrom always succeeds),
+///      and the sink would "think funds arrived". So asset must be a protocol-recognized canonical market asset.
+/// @dev Boundary: this contract only **defines** receipts; it does not verify destination-chain state or release funds.
 contract CanonicalReceiptRegistry is ICanonicalReceiptSource {
     struct ReceiptContext {
         uint64 epoch;
@@ -32,7 +32,7 @@ contract CanonicalReceiptRegistry is ICanonicalReceiptSource {
         bool set;
     }
 
-    /// @notice 可登记回执上下文的权威角色（部署时的 Settlement 或运营多签）。
+    /// @notice The authority allowed to register receipt contexts (the Settlement at deploy time, or the operator multisig).
     address public immutable registrar;
 
     error NotRegistrar();
@@ -44,7 +44,7 @@ contract CanonicalReceiptRegistry is ICanonicalReceiptSource {
     /// @notice Reject a second digest attempting to reuse the same order.
     mapping(uint256 => bytes32) public registeredDigestByOrder;
 
-    /// @notice digest → 已锁定的回执上下文。
+    /// @notice digest -> locked receipt context.
     mapping(bytes32 => ReceiptContext) public contexts;
 
     event ReceiptContextSet(
@@ -66,8 +66,8 @@ contract CanonicalReceiptRegistry is ICanonicalReceiptSource {
         registrar = registrar_;
     }
 
-    /// @notice 登记某结算摘要对应的 canonical 回执上下文。**只能登记一次**。
-    /// @dev 参数必须来自源链已锁定状态（订单簿订单 + 市场配置），不得来自证明者。
+    /// @notice Register the canonical receipt context for a settlement digest. **Registerable only once**.
+    /// @dev Parameters must come from locked source-chain state (order-book orders + market configuration), never from a prover.
     function setContext(
         bytes32 digest,
         uint64 epoch,
@@ -115,7 +115,7 @@ contract CanonicalReceiptRegistry is ICanonicalReceiptSource {
         );
     }
 
-    /// @notice 该摘要的 canonical 回执哈希（源链独立重算）。
+    /// @notice The canonical receipt hash for this digest (recomputed independently by the source chain).
     function receiptHashOf(bytes32 digest) public view returns (bytes32) {
         ReceiptContext memory c = contexts[digest];
         if (!c.set) revert NotSet();
@@ -141,7 +141,7 @@ contract CanonicalReceiptRegistry is ICanonicalReceiptSource {
         return (c.targetChainId, c.receiptSink, c.asset, c.amount, c.recipient, _hash(c));
     }
 
-    /// @dev 编码必须与目标链 `PaymentReceiptSink.receiptHashOf` **完全一致**。
+    /// @dev The encoding must match the destination-chain `PaymentReceiptSink.receiptHashOf` **exactly**.
     function _hash(ReceiptContext memory c) private pure returns (bytes32) {
         return keccak256(
             abi.encode(

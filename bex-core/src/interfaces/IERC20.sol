@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.24;
 
-/// @notice 第一版只用到最小 ERC20 子集。
+/// @notice The first version only uses a minimal ERC20 subset.
 interface IERC20 {
     function transfer(address to, uint256 amount) external returns (bool);
 

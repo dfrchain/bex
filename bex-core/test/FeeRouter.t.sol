@@ -5,21 +5,21 @@ import { Test } from "forge-std/Test.sol";
 
 import { FeeRouter } from "../src/FeeRouter.sol";
 
-/// @notice 费用层 v1（`docs/35` 的 D 步）：接口与分账数学冻结、**钱路关闭**。
-/// @dev 本文件把设计单 §六 的不变量逐条落成断言；其中 I1/I4/I5（用户金额不变、退款不受费、
-///      不影响分配不变量）在 v1 是**结构性成立**的——`collect()` 一律 revert 且没有任何调用点，
-///      因此这里用"钱路关闭 + 没有转账路径"来代表，等开收费时再补端到端用例。
+/// @notice Fee layer v1 (step D of `docs/35`): frozen interface and split math, **money path closed**.
+/// @dev This file turns each invariant of design note §6 into an assertion; of these, I1/I4/I5 (user amounts unchanged, refunds fee-free,
+///      no effect on allocation invariants) hold **structurally** in v1 — `collect()` always reverts and has no call sites,
+///      so they are represented here by "money path closed + no transfer path", with end-to-end cases to be added once fees are enabled.
 contract FeeRouterTest is Test {
     address internal constant SOLVER = address(0x5017);
     address internal constant RISK_POOL = address(0x8157);
     address internal constant OPS = address(0x0055);
-    uint256 internal constant CAP_BPS = 100; // 1% 硬上限（docs/31 B 组）
+    uint256 internal constant CAP_BPS = 100; // 1% hard cap (docs/31 group B)
 
     function _v1Config() internal pure returns (FeeRouter.Config memory) {
         return FeeRouter.Config({
-            feeBps: 0, // v1：收费开关默认关
+            feeBps: 0, // v1: fee switch off by default
             capBps: CAP_BPS,
-            minFee: 50_000, // 0.05 USDT（6 位小数）
+            minFee: 50_000, // 0.05 USDT (6 decimals)
             solverBps: 8_000, // 80%
             riskPoolBps: 1_500, // 15%
             opsBps: 500, // 5%
@@ -33,7 +33,7 @@ contract FeeRouterTest is Test {
         return new FeeRouter(config);
     }
 
-    // ------------------------------------------------------------ v1 行为
+    // ------------------------------------------------------------ v1 behavior
 
     function test_V1ConfigDeploysAndQuotesZero() public {
         FeeRouter router = _deploy(_v1Config());
@@ -52,18 +52,18 @@ contract FeeRouterTest is Test {
         assertEq(c.minFee, 50_000);
     }
 
-    /// 钱路关闭：`collect()` 必须显式拒绝，不能返回 0 让调用方误以为"已收费"
+    /// Money path closed: `collect()` must explicitly reject, not return 0 and let callers think "fee collected".
     function test_V1CollectIsDisabled() public {
         FeeRouter router = _deploy(_v1Config());
         vm.expectRevert(FeeRouter.FeeCollectionDisabled.selector);
         router.collect(1, bytes32(uint256(0xabc)), 1_000e6, SOLVER);
     }
 
-    // ------------------------------------------------------------ 部署期上下界（I6 + 参数表）
+    // ------------------------------------------------------------ Deploy-time bounds (I6 + parameter table)
 
     function test_RejectsFeeAboveCapOrNonZeroInV1() public {
         FeeRouter.Config memory c = _v1Config();
-        c.feeBps = 1; // v1 必须为 0
+        c.feeBps = 1; // v1 must be 0
         vm.expectRevert(abi.encodeWithSelector(FeeRouter.FeeConfigOutOfBounds.selector, "feeBps!=0"));
         _deploy(c);
     }
@@ -82,7 +82,7 @@ contract FeeRouterTest is Test {
 
     function test_RejectsMinFeeAboveOneUsdt() public {
         FeeRouter.Config memory c = _v1Config();
-        c.minFee = 1_000_001; // > 1 USDT（6 位小数）
+        c.minFee = 1_000_001; // > 1 USDT (6 decimals)
         vm.expectRevert(abi.encodeWithSelector(FeeRouter.FeeConfigOutOfBounds.selector, "minFee"));
         _deploy(c);
     }
@@ -117,14 +117,14 @@ contract FeeRouterTest is Test {
         _deploy(c);
 
         c = _v1Config();
-        c.ops = RISK_POOL; // 与风险池重复
+        c.ops = RISK_POOL; // Duplicates the risk pool
         vm.expectRevert(abi.encodeWithSelector(FeeRouter.FeeConfigOutOfBounds.selector, "recipient"));
         _deploy(c);
     }
 
-    // ------------------------------------------------------------ 分账数学（I2/I3/I8）
+    // ------------------------------------------------------------ Split math (I2/I3/I8)
 
-    /// 与 `spec/09` 决策三的口径对齐：1,000 USDT 单、5 bp → 费 0.5，求解者 0.4、风险池 0.075、运营 0.025
+    /// Aligned with `spec/09` decision 3: a 1,000 USDT order at 5 bp -> fee 0.5, solver 0.4, risk pool 0.075, ops 0.025
     function test_QuoteMatchesSpecEconomics() public {
         FeeRouter router = _deploy(_v1Config());
         FeeRouter.Split memory s = router.quoteAt(1_000e6, 5);
@@ -134,26 +134,26 @@ contract FeeRouterTest is Test {
         assertEq(s.toOps, 25_000, "0.025 USDT = 5%");
     }
 
-    /// 取整方向：费用向上取整（不足 1 个最小单位也要收 1），余数归求解者
+    /// Rounding direction: fees round up (even a fraction of one smallest unit is charged as 1), remainder goes to the solver
     function test_RoundingIsUpForFeeAndRemainderToSolver() public {
-        // 单独把 minFee 归零，隔离"取整"这一条（否则最低收费会把结果顶到 0.05 USDT）
+        // Zero minFee on its own to isolate the "rounding" rule (otherwise the minimum fee would push the result to 0.05 USDT)
         FeeRouter.Config memory c = _v1Config();
         c.minFee = 0;
         FeeRouter router = _deploy(c);
-        FeeRouter.Split memory s = router.quoteAt(1, 5); // 1 个最小单位 × 5bp
+        FeeRouter.Split memory s = router.quoteAt(1, 5); // 1 smallest unit x 5bp
         assertEq(s.total, 1, "fee rounds up");
         assertEq(s.toRiskPool, 0);
         assertEq(s.toOps, 0);
         assertEq(s.toSolver, 1, "remainder to solver");
     }
 
-    /// 费用关闭时最低收费不生效（否则"关费率"会被解读成强制收 0.05 USDT）
+    /// Minimum fee does not apply when fees are off (otherwise "rate off" would read as a forced 0.05 USDT charge)
     function test_MinFeeDoesNotApplyWhenRateIsZero() public {
-        FeeRouter router = _deploy(_v1Config()); // minFee = 0.05 USDT，feeBps = 0
+        FeeRouter router = _deploy(_v1Config()); // minFee = 0.05 USDT, feeBps = 0
         assertEq(router.quoteAt(1_000e6, 0).total, 0, "zero rate -> zero fee");
     }
 
-    /// 最低收费：bps 部分不足 `minFee` 时补足，**差额全额归求解者**（协议不抽，spec/09 决策二）
+    /// Minimum fee: when the bps part falls short of `minFee`, top it up, with the **shortfall going entirely to the solver** (the protocol takes nothing, spec/09 decision 2)
     function test_MinFeeTopsUpAndGoesToSolver() public {
         FeeRouter router = _deploy(_v1Config());
         FeeRouter.Split memory s = router.quoteAt(1e6, 5); // 1 USDT × 5bp = 0.0005 USDT < 0.05
@@ -163,7 +163,7 @@ contract FeeRouterTest is Test {
         assertEq(s.toSolver, 50_000 - 100, "the minFee gap goes to the solver");
     }
 
-    /// I2：分账恒等；I3：总费 = max(ceil(notional×feeBps/1e4), minFee)
+    /// I2: split identity; I3: total fee = max(ceil(notional x feeBps/1e4), minFee)
     function test_SplitConservationAndFormula() public {
         FeeRouter router = _deploy(_v1Config());
         uint256[6] memory notionals = [uint256(1), 999, 1e6, 123_456_789, 1_000e6, 999_999e6];
@@ -183,7 +183,7 @@ contract FeeRouterTest is Test {
         }
     }
 
-    /// 费率不得超过硬上限（防治理失控，I3）
+    /// Fee rate must not exceed the hard cap (guards against governance runaway, I3)
     function test_QuoteAtRejectsRateAboveCap() public {
         FeeRouter router = _deploy(_v1Config());
         vm.expectRevert(abi.encodeWithSelector(FeeRouter.FeeConfigOutOfBounds.selector, "feeBps"));

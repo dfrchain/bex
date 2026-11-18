@@ -1,25 +1,25 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.24;
 
-/// @title Canonical 付款回执定义源
-/// @notice 第三轮外部评审的 Critical 修复（RECEIPT-CANONICALIZATION-001）：
-///         **源链必须自己重算 receiptHash，不能相信证明者提交的值。**
+/// @title Canonical payment receipt definition source
+/// @notice Critical fix from the third external review round (RECEIPT-CANONICALIZATION-001):
+///         **The source chain must recompute receiptHash itself and must not trust a prover-submitted value.**
 ///
-///         否则攻击者可以自造一个对自己有利的回执（例如 asset=FakeToken、amount=1），
-///         在目标链上得到 `paid[fakeHash] = 1`，再把它和真实订单的 digest 拼起来。
-///         此时"receiptHash 绑定了很多字段"毫无安全意义——绑定的只是攻击者自选的字段。
+///         Otherwise an attacker can fabricate a receipt in their own favor (e.g. asset=FakeToken, amount=1),
+///         and get `paid[fakeHash] = 1` on the destination chain, then combine it with a real order's digest.
+///         At that point "receiptHash binds many fields" is meaningless for security — it only binds fields the attacker chose.
 ///
-/// @dev 权威源必须只用**源链已锁定的状态**（订单簿里的订单、批次配置、市场登记表）
-///      来推导，不得接受任何来自证明者的输入。
+/// @dev The authoritative source must derive only from **locked source-chain state** (orders in the order book, batch configuration, market registry)
+///      and must accept no input from any prover.
 interface ICanonicalReceiptSource {
-    /// @notice 针对某个结算摘要，返回源链认可的 canonical 回执定义。
-    /// @param digest 结算摘要（已绑定 epoch / 批次 / solver 等源链状态）
-    /// @return targetChainId 目标链 ID（来自市场/订单配置，不是 proof）
-    /// @return receiptSink 目标链上协议认可的回执合约（配置项，不是 proof）
-    /// @return asset 目标链结算资产（必须是市场 canonical 资产，不是 proof 自报）
-    /// @return amount 应付金额（来自订单/批次计算，不是 proof 自报）
-    /// @return recipient 收款人（来自订单，不是 proof 自报）
-    /// @return receiptHash 源链独立算出的 canonical 回执哈希
+    /// @notice For a given settlement digest, return the canonical receipt definition recognized by the source chain.
+    /// @param digest Settlement digest (already bound to source-chain state: epoch / batch / solver, etc.)
+    /// @return targetChainId Destination chain ID (from market/order configuration, not from the proof)
+    /// @return receiptSink The protocol-recognized receipt contract on the destination chain (a configuration item, not from the proof)
+    /// @return asset Destination-chain settlement asset (must be a canonical market asset, not self-reported by the proof)
+    /// @return amount Amount due (from order/batch computation, not self-reported by the proof)
+    /// @return recipient Recipient (from the order, not self-reported by the proof)
+    /// @return receiptHash Canonical receipt hash computed independently by the source chain
     function canonicalReceipt(bytes32 digest)
         external
         view

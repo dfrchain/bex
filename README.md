@@ -1,7 +1,5 @@
 # BEX — Cross-Chain Execution Layer
 
-> 中文简介：BEX 是 DFRChain 的跨链执行层，负责接收跨链订单、由注册求解者执行、并依据可验证回执完成结算。目前部署在 Base Sepolia 与 Arbitrum Sepolia 测试网。
-
 BEX is the cross-chain execution layer of DFRChain. It takes signed cross-chain
 orders, has them executed by registered solvers, and settles them against
 verifiable receipts. BEX is currently deployed on the Base Sepolia and
@@ -47,22 +45,22 @@ libraries that are intentionally not part of this excerpt, so this snapshot on
 its own is not a standalone buildable package as-is. All commands below are
 taken from the source repository's own documentation. None of them were
 executed against this snapshot during preparation, and each is marked
-未复核 (not verified).
+(not verified).
 
 ## Quick start
 
 ```bash
-# 克隆本仓库（未复核：命令未实际执行验证）
+# Clone this repository (not verified: command not actually run to verify)
 git clone https://github.com/dfrchain/bex.git
 cd bex/bex-core
 
-# 未复核：fetch the submodule dependencies (forge-std, halmos-cheatcodes)
+# Not verified: fetch the submodule dependencies (forge-std, halmos-cheatcodes)
 git submodule update --init --recursive
 
-# 未复核
+# Not verified
 forge build
 
-# 未复核
+# Not verified
 forge test
 ```
 
@@ -72,10 +70,10 @@ Prerequisites: git and Foundry (the source docs specify forge 1.8.3). See
 ## Local demo (Anvil)
 
 ```bash
-# 未复核：start a local chain (default 127.0.0.1:8545)
+# Not verified: start a local chain (default 127.0.0.1:8545)
 anvil
 
-# 未复核：deploy the mock asset and PaymentReceiptSink, then make a real pay() call
+# Not verified: deploy the mock asset and PaymentReceiptSink, then make a real pay() call
 forge script script/DeployReceiptLocal.s.sol \
   --rpc-url http://127.0.0.1:8545 \
   --sender 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266 \
@@ -85,10 +83,10 @@ forge script script/DeployReceiptLocal.s.sol \
 ## Testing
 
 ```bash
-# 未复核：full test set (from the source repository's own docs)
+# Not verified: full test set (from the source repository's own docs)
 forge test
 
-# 未复核：guard set only
+# Not verified: guard set only
 forge test --match-path 'test/guards/*' -vv
 ```
 

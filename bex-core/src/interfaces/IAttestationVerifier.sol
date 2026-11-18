@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.24;
 
-/// @title 回执验证模块接口
-/// @notice 第一版为 3-of-5 多签；第二版可替换为门限签名，第三版可替换为轻客户端或证明验证。
-///         替换时不得修改 Settlement 的业务逻辑（`04-接口与状态机规范.md` §2.4）。
+/// @title Receipt verification module interface
+/// @notice The first version is 3-of-5 multisig; the second version can swap in threshold signatures, and the third can swap in a light client or proof verification.
+///         Swapping must not change Settlement's business logic (`04-interface-and-state-machine-spec.md` §2.4).
 interface IAttestationVerifier {
     function verify(bytes32 digest, bytes calldata proof) external view returns (bool);
 }

@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.24;
 
-/// @title BEX 第一层共用类型
-/// @notice 字段顺序严格对应 `06-数据编码与哈希规范.md` 与 `04-接口与状态机规范.md`，
-///         任何调整都会改变 orderHash 与 settlementDigest，必须同步升版本号。
+/// @title BEX layer-1 shared types
+/// @notice Field order strictly matches `06-data-encoding-and-hashing-spec.md` and `04-interface-and-state-machine-spec.md`;
+///         any change alters orderHash and settlementDigest, so the version must be bumped together.
 
-/// @notice 用户订单。字段顺序即 orderHash 的 ABI 编码顺序，不得调整。
+/// @notice User order. Field order is the ABI encoding order of orderHash; do not change it.
 struct Order {
     address trader;
     address sellToken;
@@ -18,35 +18,35 @@ struct Order {
     uint256 nonce;
 }
 
-/// @notice 密封档订单（承诺制）：链上**只存承诺与金额上界**，订单内容（价格、数量、方向）
-///         留在用户本地加密的信封里，封盘后由门限委员会解密并签发揭示证书。
-/// @dev 与 `Order` 的差别即密封档的泄漏面（见 `docs/23` §3.3）：
-///      - 链上可见：trader、sellToken、buyToken、maxSellAmount（上界）、commitment、ciphertextHash、epoch；
-///      - 链上不可见：限价、真实数量（只能推出 ≤ maxSellAmount）、方向以外的意图、盐。
-/// @dev **存储打包（2026-09-26 优化）**：字段顺序按"能合槽就合槽"排列——
-///      `trader(20) + epoch(8)` 同槽、`maxSellAmount` 用 uint120（与 `MAX_ORDER_VALUE` 同界），
-///      整个结构占 **7 个槽**。满批 200 单结算要逐单读一次，省下的 1 个冷 SLOAD/单 ≈ 42 万 gas（实测见 `test/GasReportSealed.t.sol`）。
-///      改字段顺序或类型会改变 orderId（因为 orderId 对公开字段做 ABI 编码），必须同步升版本。
+/// @notice Sealed-tier order (commitment-based): on-chain stores **only the commitment and the amount upper bound**; order contents (price, quantity, direction)
+///         stay in an envelope encrypted on the user's device, decrypted after close by the threshold committee, which issues a reveal certificate.
+/// @dev The difference from `Order` is exactly the sealed tier's leakage surface (see `docs/23` §3.3):
+///      - Visible on-chain: trader, sellToken, buyToken, maxSellAmount (upper bound), commitment, ciphertextHash, epoch;
+///      - Not visible on-chain: limit price, true quantity (only ≤ maxSellAmount can be inferred), intent beyond direction, salt.
+/// @dev **Storage packing (optimized 2026-09-26)**: field order is arranged to "pack slots wherever possible" —
+///      `trader(20) + epoch(8)` share a slot, `maxSellAmount` uses uint120 (same bound as `MAX_ORDER_VALUE`),
+///      and the whole struct takes **7 slots**. Settling a full 200-order batch reads each order once, so the 1 cold SLOAD saved per order is ≈ 420K gas (measured; see `test/GasReportSealed.t.sol`).
+///      Changing field order or types changes orderId (orderId ABI-encodes the public fields), so the version must be bumped together.
 struct SealedOrder {
     address trader;
-    /// @dev 与 trader 同槽（20+8=28 字节）。
+    /// @dev Shares a slot with trader (20+8=28 bytes).
     uint64 epoch;
     address sellToken;
     address buyToken;
-    /// @dev 金额上界，同时也是锁定额；上限为 `MAX_ORDER_VALUE = type(uint120).max`。
-    ///      结算时按已揭示的真实成交量释放，余数退回用户。
+    /// @dev Amount upper bound, also the locked amount; capped at `MAX_ORDER_VALUE = type(uint120).max`.
+    ///      At settlement it is released per the revealed true volume, with the remainder refunded to the user.
     uint120 maxSellAmount;
-    /// @dev 订单内容承诺：`keccak(内容 ‖ 盐)`，盐只存在于用户与委员会之间。
+    /// @dev Order content commitment: `keccak(contents ‖ salt)`; the salt exists only between the user and the committee.
     bytes32 commitment;
-    /// @dev 加密信封的哈希（数据可用性指针），委员会用它取回密文。
+    /// @dev Hash of the encrypted envelope (a data-availability pointer); the committee uses it to fetch the ciphertext.
     bytes32 ciphertextHash;
     uint256 nonce;
 }
 
-/// @notice 密封档**揭示**（开盒）后的订单内容：封盘后与揭示证书一起提交上链。
-/// @dev 承诺式订单簿的链上强制点：`commitment` 必须等于本结构（含盐）按
-///      `SealedOrderLib.commitmentOf` 重算的结果，因此委员会无法用另一份内容替换用户的承诺。
-///      字段顺序冻结在 `docs/05` §40，任何调整都会改变承诺值，必须升版本号。
+/// @notice Order contents after a sealed-tier **reveal** (unboxing): submitted on-chain after close together with the reveal certificate.
+/// @dev The on-chain enforcement point of the commitment-based order book: `commitment` must equal this struct (salt included), recomputed via
+///      `SealedOrderLib.commitmentOf`, so the committee cannot swap the user's commitment for different contents.
+///      Field order is frozen in `docs/05` §40; any change alters commitment values and requires a version bump.
 struct SealedOpening {
     bytes32 orderId;
     address trader;
@@ -60,33 +60,33 @@ struct SealedOpening {
     bytes32 salt;
 }
 
-/// @notice 单笔成交明细。
+/// @notice Single fill details.
 struct Fill {
     bytes32 orderId;
     uint256 amountSold;
     uint256 amountReceived;
 }
 
-/// @notice 结算载荷。
-/// @dev 已按 `docs/05-M2接口钉死记录.md` 第五节冻结：
-///      - `orderIds` 必须是本批**全部封盘订单**（含未成交订单），按 `(limit, orderId)` 升序；
-///      - `submissionIndices[i]` 是 `orderIds[i]` 在 `OrderBook` 提交顺序中的序号；
-///      - 合约据此校验 `epochOrderIdAt(epoch, idx) == orderIds[i]`，并用 256 位位图
-///        证明载荷恰好覆盖 `0..N-1`，从而在不排序、不信任撮合方的前提下完成集合完整性校验。
+/// @notice Settlement payload.
+/// @dev Frozen per `docs/05-M2-interface-freeze-record.md` §5:
+///      - `orderIds` must be **all closed orders of this batch** (including unfilled ones), in ascending `(limit, orderId)` order;
+///      - `submissionIndices[i]` is the index of `orderIds[i]` in `OrderBook`'s submission order;
+///      - The contract checks `epochOrderIdAt(epoch, idx) == orderIds[i]` against this, and uses a 256-bit bitmap
+///        to prove the payload covers exactly `0..N-1`, completing the set-integrity check without sorting or trusting the matcher.
 struct BatchSettlement {
     uint64 epoch;
     uint256 chainId;
     bytes32 pairHash;
-    /// @dev 交易对定义。链上复算必须知道 base/quote 才能判定订单方向：
-    ///      sellToken == baseToken 为卖单（ask），否则为买单（bid）。
-    ///      `pairHash` 必须等于 `keccak256(abi.encode(baseToken, quoteToken))`（见 docs/05 第七节）。
+    /// @dev Trading-pair definition. On-chain recomputation needs base/quote to determine order direction:
+    ///      sellToken == baseToken is a sell order (ask), otherwise a buy order (bid).
+    ///      `pairHash` must equal `keccak256(abi.encode(baseToken, quoteToken))` (see docs/05 §7).
     address baseToken;
     address quoteToken;
     uint256 priceNum;
     uint256 priceDen;
-    /// @dev 最终成交量（base 单位）。取整可行性回退可能把它压到 `_scan` 复算出的最大值以下，
-    ///      因此必须由载荷显式声明并纳入摘要：链上校验 `volume ≤ _scan 复算值` 与分配不变量，
-    ///      "它是否为最大可行值"由 3-of-5 验证者在链下核验（见 docs/05 第十一节，Option B）。
+    /// @dev Final traded volume (in base units). The rounding-feasibility fallback may push it below the maximum recomputed by `_scan`,
+    ///      so it must be declared explicitly by the payload and included in the digest: on-chain checks `volume ≤ _scan recomputed value` and the allocation invariants,
+    ///      while "whether it is the maximum feasible value" is verified off-chain by the 3-of-5 verifiers (see docs/05 §11, Option B).
     uint256 volume;
     bytes32 orderSetHash;
     bytes32 matcherVersion;
@@ -97,7 +97,7 @@ struct BatchSettlement {
     Fill[] fills;
 }
 
-/// @notice 订单状态机。取值顺序必须与 `04-接口与状态机规范.md` §三 的转移表一致。
+/// @notice Order state machine. The value order must match the transition table in `04-interface-and-state-machine-spec.md` §3.
 enum OrderState {
     NONE,
     SUBMITTED,

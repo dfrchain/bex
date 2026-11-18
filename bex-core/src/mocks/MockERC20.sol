@@ -2,8 +2,8 @@
 pragma solidity 0.8.24;
 
 /// @title MockERC20
-/// @notice 仅用于本地开发与验收的测试代币。
-/// @dev 未做安全审计，**禁止用于任何真实资产场景**。第一版上线时使用真实稳定币。
+/// @notice Test token for local development and acceptance only.
+/// @dev Not security-reviewed; **must not be used with any real assets**. The first release uses real stablecoins.
 contract MockERC20 {
     string public name;
     string public symbol;

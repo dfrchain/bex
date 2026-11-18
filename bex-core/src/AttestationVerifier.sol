@@ -6,19 +6,19 @@ import { ISignerRecovery } from "./interfaces/ISignerRecovery.sol";
 import { AttestationParams } from "./libraries/AttestationParams.sol";
 
 /// @title AttestationVerifier
-/// @notice 回执验证模块：**部署期可配的 t-of-n 多签**（默认 3-of-5，与第一版逐位一致）。
-/// @dev M2 实现。已钉死的三个约定（见 docs/05-M2接口钉死记录.md）：
-///      1. 签名方式：对 `digest` 做 EIP-191 personal_sign 后签名；
-///      2. proof 格式：N 段 65 字节签名（r ‖ s ‖ v）直接拼接，顺序无关；
-///      3. 重复签名者、非签名者、非低 s 值、空或长度非 65 倍数，一律拒绝。
-///      签名者集合在第一版不可变更；更新机制见评审 P1-5，属于后续版本。
+/// @notice Receipt verification module: **deploy-time configurable t-of-n multisig** (default 3-of-5, matching the first version exactly).
+/// @dev M2 implementation. The three frozen conventions (see docs/05-M2-interface-freeze-record.md):
+///      1. Signing method: sign `digest` after EIP-191 personal_sign wrapping;
+///      2. proof format: N 65-byte signatures (r ‖ s ‖ v) concatenated directly, order-independent;
+///      3. Duplicate signers, non-signers, non-low-s values, and empty or non-65-multiple lengths are all rejected.
+///      The signer set is immutable in the first version; the update mechanism is review item P1-5 and belongs to a later version.
 contract AttestationVerifier is IAttestationVerifier, ISignerRecovery {
-    /// @notice 门限（t）。**部署期参数**：`majority(n) ≤ t ≤ n`（`AttestationParams.validate`）。
+    /// @notice Threshold (t). **Deploy-time parameter**: `majority(n) ≤ t ≤ n` (`AttestationParams.validate`).
     uint256 public immutable THRESHOLD;
-    /// @notice 签名者人数（n）。**部署期参数**：1 ≤ n ≤ 15（`AttestationParams.MAX_SIGNERS`）。
+    /// @notice Signer count (n). **Deploy-time parameter**: 1 ≤ n ≤ 15 (`AttestationParams.MAX_SIGNERS`).
     uint256 public immutable SIGNER_COUNT;
 
-    /// @dev secp256k1 曲线阶的一半，用于拒绝可延展签名（s > n/2）。
+    /// @dev Half the secp256k1 curve order, used to reject malleable signatures (s > n/2).
     uint256 private constant SECP256K1N_DIV_2 = 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0;
 
     error InvalidSignerSet();
@@ -27,8 +27,8 @@ contract AttestationVerifier is IAttestationVerifier, ISignerRecovery {
     address[] private _signers;
     mapping(address => bool) private _isSigner;
 
-    /// @param signers_ 签名者集合（动态长度，1–15 个；重复或零地址即 revert）
-    /// @param threshold_ 门限（严格多数 ≤ t ≤ n）
+    /// @param signers_ Signer set (dynamic length, 1–15 entries; duplicates or the zero address revert)
+    /// @param threshold_ Threshold (strict majority ≤ t ≤ n)
     constructor(address[] memory signers_, uint256 threshold_) {
         uint256 n = signers_.length;
         AttestationParams.validate(n, threshold_);
@@ -42,8 +42,8 @@ contract AttestationVerifier is IAttestationVerifier, ISignerRecovery {
         }
     }
 
-    /// @notice 验证回执签名。
-    /// @dev 校验全部提供的签名（不提前返回），再要求有效且互不相同的签名数达到阈值。
+    /// @notice Verify receipt signatures.
+    /// @dev Validate every provided signature (no early return), then require the count of valid, distinct signatures to reach the threshold.
     function verify(bytes32 digest, bytes calldata proof) external view returns (bool) {
         if (proof.length == 0 || proof.length % 65 != 0) revert InvalidProofLength();
 
@@ -52,13 +52,13 @@ contract AttestationVerifier is IAttestationVerifier, ISignerRecovery {
 
         bytes32 signedHash = keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", digest));
 
-        // 去重数组按**实际人数**开，随 SIGNER_COUNT 参数化（旧实现写死 5 个槽位）
+        // Size the dedup array by the **actual signer count**, parameterized by SIGNER_COUNT (the old implementation hardcoded 5 slots)
         address[] memory seen = new address[](SIGNER_COUNT);
         uint256 valid = 0;
 
         for (uint256 i = 0; i < n; i++) {
             (uint8 v, bytes32 r, bytes32 s) = _split(proof, i);
-            if (v != 27 && v != 28) return false; // 审计 L-1：v 必须规范
+            if (v != 27 && v != 28) return false; // Audit L-1: v must be canonical
             if (uint256(s) > SECP256K1N_DIV_2) return false;
 
             address signer = ecrecover(signedHash, v, r, s);
@@ -74,10 +74,10 @@ contract AttestationVerifier is IAttestationVerifier, ISignerRecovery {
         return valid >= THRESHOLD;
     }
 
-    /// @notice 恢复 proof 中**有效且互不相同**的签名者集合（BEX-21 选项 B 的归因入口）。
-    /// @dev 与 `verify` 同一套校验（v 规范、低 s、签名者集、去重），但返回集合本身而非布尔：
-    ///      无效、重复或非签名者的签名被跳过、不计入；proof 长度非法与 `verify` 一致 revert。
-    ///      是否达到门限由调用方判断——`verify` 的语义不因此函数而改变。
+    /// @notice Recover the set of **valid, distinct** signers in a proof (the attribution entry point for BEX-21 option B).
+    /// @dev Same checks as `verify` (canonical v, low s, signer set, dedup), but returns the set itself instead of a boolean:
+    ///      Invalid, duplicate, or non-signer signatures are skipped and not counted; an illegal proof length reverts exactly as in `verify`.
+    ///      Whether the threshold is met is for the caller to decide — the semantics of `verify` do not change because of this function.
     function recoverValidSigners(bytes32 digest, bytes calldata proof) external view returns (address[] memory) {
         if (proof.length == 0 || proof.length % 65 != 0) revert InvalidProofLength();
 
@@ -115,18 +115,18 @@ contract AttestationVerifier is IAttestationVerifier, ISignerRecovery {
         return out;
     }
 
-    /// @notice 返回第 i 个签名者地址（仅用于 M1 自检与 M2 测试）。
+    /// @notice Return the address of the i-th signer (only for M1 self-checks and M2 tests).
     function signerAt(uint256 i) external view returns (address) {
         require(i < SIGNER_COUNT, "index out of range");
         return _signers[i];
     }
 
-    /// @notice 某地址是否为签名者。
+    /// @notice Whether an address is a signer.
     function isSigner(address account) external view returns (bool) {
         return _isSigner[account];
     }
 
-    /// @dev 从拼接的 proof 中取出第 i 段签名。
+    /// @dev Extract the i-th signature segment from the concatenated proof.
     function _split(bytes calldata proof, uint256 i) private pure returns (uint8 v, bytes32 r, bytes32 s) {
         uint256 offset = i * 65;
         assembly {

@@ -1,17 +1,17 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.24;
 
-/// @title 版本化签名者质押登记接口（BEX-21 选项 B）
-/// @notice `ChallengeableAttestation` 附加门消费的最小面：
-///         纪元快照门限、签名者是否"快照内 + 足额锁定 + 未退出"、质押余额、授权罚没。
-///         登记/锁定/退出的完整 API 见 `SignerStakeRegistry` 本体。
+/// @title Versioned signer stake registry interface (BEX-21 option B)
+/// @notice Minimal surface consumed by the `ChallengeableAttestation` add-on gate:
+///         epoch snapshot thresholds, whether a signer is "in-snapshot + sufficiently locked + not exited", stake balances, and authorized slashing.
+///         The full register/lock/exit API is in the `SignerStakeRegistry` contract itself.
 interface ISignerStakeRegistry {
-    /// @notice 某纪元当前快照的签名门限；无快照时返回 0（调用方据此 fail-closed）。
+    /// @notice Signature threshold of the current snapshot for an epoch; returns 0 when there is no snapshot (callers fail closed on that).
     function snapshotThreshold(uint64 epoch) external view returns (uint256);
-    /// @notice 签名权是否有效：属于当前快照、锁定质押达到快照要求、且未请求退出。
+    /// @notice Whether signing power is valid: in the current snapshot, locked stake meets the snapshot requirement, and no exit requested.
     function isBondedSigner(uint64 epoch, address signer) external view returns (bool);
-    /// @notice 某签名者在某纪元的当前锁定质押。
+    /// @notice A signer's currently locked stake in an epoch.
     function stakeOf(uint64 epoch, address signer) external view returns (uint256);
-    /// @notice 罚没（仅登记时绑定的唯一 slasher 可调）：按可用质押封顶，返回实际罚没额。
+    /// @notice Slash (only the single slasher bound at registration may call): capped by available stake, returns the actual slashed amount.
     function slash(uint64 epoch, address signer, uint256 amount, address to) external returns (uint256 slashed);
 }

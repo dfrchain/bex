@@ -6,9 +6,9 @@ import { console2 } from "forge-std/console2.sol";
 import { PaymentReceiptSink } from "../src/PaymentReceiptSink.sol";
 import { MockERC20 } from "../src/mocks/MockERC20.sol";
 
-/// @notice 本地真链脚手：部署 sink + token，真实调用 pay()，打印回执哈希。
-/// @dev 目的：产出**真实 eth_getProof 向量**（评审第三轮强制要求），
-///      而不是自洽的 Python 向量。
+/// @notice Local live-chain scaffold: deploy sink + token, make a real pay() call, and print the receipt hash.
+/// @dev Purpose: produce **real eth_getProof vectors** (mandated by the third review round),
+///      rather than self-consistent Python vectors.
 contract DeployReceiptLocal is Script {
     function run() external {
         vm.startBroadcast();

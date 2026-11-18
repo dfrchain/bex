@@ -3,38 +3,38 @@ pragma solidity 0.8.24;
 
 import { Order } from "../types/BexTypes.sol";
 
-/// @title 结算层需要的订单簿接口（最小面）
-/// @notice `Settlement` 只依赖这 5 个方法：封盘状态、退款截止高度、集合承诺、退款入口、批量落账。
-///         公开档（`OrderBook`）与密封档（`SealedOrderBook`）因此可以共用同一个结算合约，
-///         而结算层始终不读取任何订单内容。
-/// @dev 为什么把依赖从具体合约改成接口：密封档的订单簿只存承诺/密文，无法复用 `OrderBook` 的
-///      明文存储；若让 `Settlement` 继续依赖具体类型，就必须改结算层才能接入。
-///      本接口把改动限制在**依赖类型**上，`Settlement` 的校验顺序与控制流一行未动（见 `docs/05` §40）。
+/// @title Order-book interface the settlement layer needs (minimal surface)
+/// @notice `Settlement` depends on only these 5 methods: close status, refund deadline height, set commitment, refund entry point, and bulk posting.
+///         The plaintext tier (`OrderBook`) and the sealed tier (`SealedOrderBook`) can therefore share one settlement contract,
+///         and the settlement layer never reads any order contents.
+/// @dev Why the dependency moved from a concrete contract to an interface: the sealed tier's order book stores only commitments/ciphertext and cannot reuse `OrderBook`'s
+///      plaintext storage; if `Settlement` kept depending on a concrete type, the settlement layer would have to change to plug it in.
+///      This interface confines the change to the **dependency type**; `Settlement`'s check order and control flow are untouched (see `docs/05` §40).
 interface IOrderBook {
-    /// @notice 某批次是否已封盘。
+    /// @notice Whether a batch has been closed.
     function isSealed(uint64 epoch) external view returns (bool);
 
-    /// @notice 回执提交截止高度；越过它用户可取回资产。
+    /// @notice Receipt submission deadline height; past it, users can reclaim their funds.
     function epochDeadlineBlock(uint64 epoch) external view returns (uint256);
 
-    /// @notice 封盘时保存的订单集合承诺。
+    /// @notice Order-set commitment stored at close.
     function orderSetHashOf(uint64 epoch) external view returns (bytes32);
 
-    /// @notice 结算触发的退款。仅结算合约可调用。
+    /// @notice Settlement-triggered refund. Settlement contract only.
     /// @dev Settlement forwards the original external caller so an arbitrary third party cannot force a refund.
     function refundOnSettlement(bytes32 orderId, address requester) external;
 
-    /// @notice 批量落账：把成交数量转给求解者，剩余退回用户。
+    /// @notice Bulk posting: transfer traded amounts to the solver and refund the remainder to users.
     function settleBatch(bytes32[] calldata orderIds, uint256[] calldata amountSolds, address solver) external;
 
-    /// @notice 本档的封盘集合是否提供**明文订单有效期**（档位无关的时限校验的数据来源）。
-    /// @dev 公开档：`true`（内容明文在链上，`Settlement` 可逐单校验 `validUntil`）；
-    ///      密封档：`false`（有效期属**密文内容**，链上只有承诺——由该档验证器在揭示时强制，
-    ///      见 `SealedMatchVerifier` 里对 `opening.validUntil` 的校验）。
-    ///      这条**必须显式声明**：静默返回空集合会让"结算窗口/有效期"校验悄悄消失。
+    /// @notice Whether this tier's closed set provides **plaintext order validity** (the data source for tier-independent deadline checks).
+    /// @dev Plaintext tier: `true` (contents are plaintext on-chain, so `Settlement` can check `validUntil` per order);
+    ///      Sealed tier: `false` (validity is **ciphertext content**; only the commitment is on-chain — enforced by that tier's verifier at reveal,
+    ///      see the check on `opening.validUntil` in `SealedMatchVerifier`).
+    ///      This **must be declared explicitly**: silently returning an empty set would make the "settlement window / validity" checks quietly disappear.
     function exposesPlaintextValidity() external view returns (bool);
 
-    /// @notice 仅当 `exposesPlaintextValidity() == true` 时可用：本批封盘集合的明文订单内容。
-    /// @dev 不提供明文的档调用此方法一律 revert（而不是返回空数组），避免调用方误以为"没有过期单"。
+    /// @notice Only usable when `exposesPlaintextValidity() == true`: the plaintext order contents of this batch's closed set.
+    /// @dev Tiers without plaintext revert on this method (instead of returning an empty array), so callers never mistake it for "no expired orders".
     function epochOrderContents(uint64 epoch) external view returns (Order[] memory orders);
 }

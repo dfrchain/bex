@@ -9,55 +9,55 @@ import { SolverRegistry } from "./SolverRegistry.sol";
 import { BatchSettlement, Order } from "./types/BexTypes.sol";
 
 /// @title Settlement
-/// @notice 校验回执与结算窗口、按成交明细落账，并处理退款。**不自行复算撮合结果**：
-///         撮合有效性交给按档位实现的 `IMatchVerifier`（公开档 = `PlaintextMatchVerifier`），
-///         因此结算层不读任何订单内容（见 `docs/09-档位预留接口规范.md` 第二、三节）。
-/// @dev 校验顺序决定各类攻击命中哪个错误码：
-///      1. 链 ID 绑定 → WrongChain
-///      2. 摘要是否已消费 → DigestAlreadyConsumed
-///      3. 同批次是否已结算 → MultiplePrices
-///      4. 批次是否封盘 → EpochClosed
-///      5. 集合承诺与交易对定义 → OrderSetMismatch / InvalidOrder
-///      6. 撮合有效性 → 由 `matchVerifier.verifyMatch` 决定（公开档会报 OrderSetMismatch /
-///         PayloadNotPriceOrdered / RecomputeMismatch / BelowUserLimit）
-///      7. 结算窗口 → InvalidOrder / EpochClosed（注：载荷 `deadline` 的越窗检查在
-///         `matchVerifier.verifyMatch` **之后**，让档位自身的错误码（如密封档的 RevealExpired）
-///         优先暴露；第 8 轮审计 L-02 记录了这一顺序，注释与实现保持一致）
-///      8. 求解者门槛 → NotRegistered / SolverBondInsufficient
-///      9. 回执签名 → AttestationInvalid
+/// @notice Validate receipts and the settlement window, post fills, and handle refunds. **Does not recompute match results itself**:
+///         match validity is delegated to the per-tier `IMatchVerifier` (plaintext tier = `PlaintextMatchVerifier`),
+///         so the settlement layer reads no order contents at all (see `docs/09-tier-reserved-interface-spec.md` §2–3).
+/// @dev The check order decides which error code each attack hits:
+///      1. Chain ID binding -> WrongChain
+///      2. Whether the digest was already consumed -> DigestAlreadyConsumed
+///      3. Whether the same batch was already settled -> MultiplePrices
+///      4. Whether the batch is closed -> EpochClosed
+///      5. Set commitment and trading-pair definition -> OrderSetMismatch / InvalidOrder
+///      6. Match validity -> decided by `matchVerifier.verifyMatch` (the plaintext tier reports OrderSetMismatch /
+///         PayloadNotPriceOrdered / RecomputeMismatch / BelowUserLimit)
+///      7. Settlement window -> InvalidOrder / EpochClosed (note: the payload `deadline` out-of-window check runs
+///         **after** `matchVerifier.verifyMatch`, so a tier's own error codes (e.g. RevealExpired in the sealed tier)
+///         surface first; audit round 8, L-02, records this order, and the comment matches the implementation)
+///      8. Solver threshold -> NotRegistered / SolverBondInsufficient
+///      9. Receipt signatures -> AttestationInvalid
 contract Settlement {
     bytes32 private constant SETTLEMENT_DOMAIN = keccak256("BEX_SETTLEMENT");
 
     IAttestationVerifier public immutable verifier;
-    /// @notice 订单簿依赖已抽成接口：公开档与密封档共用本结算合约（见 `IOrderBook` 注释）。
+    /// @notice The order-book dependency is now an interface: the plaintext and sealed tiers share this settlement contract (see the `IOrderBook` comments).
     IOrderBook public immutable orderBook;
-    /// @notice 撮合有效性验证器：按档位实现。结算层只通过 `verifyMatch` 与它交互（档位隔离在部署层）。
+    /// @notice Match-validity verifier: implemented per tier. The settlement layer only talks to it via `verifyMatch` (tier isolation lives at deploy time).
     IMatchVerifier public immutable matchVerifier;
-    /// @notice 部署者：仅用于一次性绑定 `SolverRegistry`（与 OrderBook 的绑定模式一致）。
+    /// @notice Deployer: used only to bind `SolverRegistry` once (same binding pattern as OrderBook).
     address public immutable deployer;
-    /// @notice 求解者注册表：绑定后结算前校验"已注册且保证金足额"；未绑定（address(0)）则跳过。
+    /// @notice Solver registry: once bound, settlement checks "registered with sufficient bond" first; if unbound (address(0)), the check is skipped.
     SolverRegistry public solverRegistry;
-    /// @notice 批次 -> 被派单的求解者（链上派单记账，docs/20）。
+    /// @notice Batch -> the solver dispatched for it (on-chain dispatch bookkeeping, docs/20).
     event SolverAllowedSet(address indexed solver, bool allowed);
 
     mapping(uint64 => address) public dispatchedSolver;
-    /// @notice 求解者白名单（RT-15，红队 freeze-1）：第一版为**协议自营求解者**（docs/12 §五.2），
-    ///         若不做白名单，任何新注册的求解者都能用一笔 `dispatch` 先占死某个 epoch 的派单位，
-    ///         把该批次拖到超时退款（用户不受损，但批次被杀）。仅 `deployer`（运营方）可维护。
+    /// @notice Solver allowlist (RT-15, red-team freeze-1): the first version uses **protocol-operated solvers** (docs/12 §5.2),
+    ///         because without an allowlist, any newly registered solver could grab an epoch's dispatch slot with one `dispatch` call,
+    ///         dragging that batch to a timeout refund (users are unharmed, but the batch is killed). Only `deployer` (the operator) may maintain it.
     mapping(address => bool) public solverAllowed;
     /// @notice Monotonic emergency revocation generation for all historical
     ///         obligations of a solver. Reauthorization never revives them.
     mapping(address => uint256) public solverAuthorizationGeneration;
-    /// @dev **派单时锁定的敞口额度**（第三轮补充复核 A）：必须在派单时落库，
-    ///      否则结算/超时释放时重算 `maxSingleOrderSize` 会因求解者中途追加保证金而变大，
-    ///      导致 `closeExposure` 数额不匹配 → 批次与保证金被永久锁死。
+    /// @dev **Exposure locked at dispatch time** (third-round supplementary review A): it must be recorded at dispatch,
+    ///      otherwise recomputing `maxSingleOrderSize` at settlement/timeout release would grow if the solver tops up bond in between,
+    ///      making the `closeExposure` amount mismatch -> the batch and bond get locked forever.
     mapping(uint64 => uint256) public dispatchHold;
-    /// @notice 罚没控制器（D-4：第一版由多签 + timelock 触发）。只有它能调用 `slashSolver`。
+    /// @notice Slash controller (D-4: triggered by multisig + timelock in the first version). Only it may call `slashSolver`.
     address public slashController;
 
     mapping(bytes32 => bool) private _consumedDigest;
-    /// @dev RT-4（红队 freeze-1）：摘要 → 消费时所在纪元。`settledDigest` 只说明"被消费过"，
-    ///      跨 epoch 锚定需要知道"这个摘要属于哪一批"。
+    /// @dev RT-4 (red-team freeze-1): digest -> the epoch in which it was consumed. `settledDigest` only says "it was consumed",
+    ///      and cross-epoch anchoring needs to know "which batch this digest belongs to".
     mapping(bytes32 => uint64) private _digestEpoch;
     mapping(uint64 => bool) private _epochSettled;
 
@@ -95,19 +95,19 @@ contract Settlement {
         deployer = msg.sender;
     }
 
-    /// @notice 是否要求先绑定 `SolverRegistry` 才能结算（默认 true）。
-    /// @dev 生产与测试网部署必须保持 true；本地演练可用一次性 `setRegistryRequired(false)` 关闭。
+    /// @notice Whether `SolverRegistry` must be bound before settling (default true).
+    /// @dev Production and testnet deployments must keep this true; local drills can turn it off once via `setRegistryRequired(false)`.
     bool private _registryRequired = true;
 
     function registryRequired() external view returns (bool) {
         return _registryRequired;
     }
 
-    /// @notice 部署者可**一次性**关闭"必须绑定注册表"的要求（仅供本地演练）。
+    /// @notice The deployer may **once** turn off the "registry must be bound" requirement (local drills only).
     function setRegistryRequired(bool required) external {
         if (msg.sender != deployer) revert Errors.NotDeployer();
         if (!_registryRequired) revert Errors.AlreadySet();
-        // R4-4：关闭门槛**只允许在本地链**（供单测/演练），避免在生产部署上被误关
+        // R4-4: turning off the gate is **only allowed on a local chain** (for unit tests/drills), so it cannot be disabled by mistake on a production deployment
         if (!required) {
             require(block.chainid == 31337 || block.chainid == 31338, "registry opt-out is local-only");
         }
@@ -115,21 +115,21 @@ contract Settlement {
         emit RegistryRequirementChanged(required);
     }
 
-    /// @notice 一次性绑定求解者注册表（审计 M-2）。绑定后不可更改；不引入可升级代理。
+    /// @notice Bind the solver registry once (audit M-2). Immutable after binding; no upgradeable proxy is introduced.
     function bindSolverRegistry(SolverRegistry registry_) external {
         if (msg.sender != deployer) revert Errors.NotDeployer();
-        if (address(registry_) == address(0)) revert Errors.InvalidOrder(); // M-4：零地址会永久关闭门槛
+        if (address(registry_) == address(0)) revert Errors.InvalidOrder(); // M-4: the zero address would permanently close the gate
         if (address(solverRegistry) != address(0)) revert Errors.AlreadySet();
         solverRegistry = registry_;
         emit SolverRegistryBound(address(registry_));
     }
 
-    /// @notice **链上派单**（docs/20）：封盘后、截止前认领批次，并锁定该批次的敞口。
-    /// @dev 派单发生在结算之前，链上此刻还不知道出清价与成交量，因此每批锁定一个保守且可预测的额度
-    ///      `maxSingleOrderSize(solverId)`（= 保证金 × 5%）；`maxTotalExposure`（×50%）天然限制在途批次 ≤ 10。
-    ///      锁定的效果由 `SolverRegistry.withdrawBond`/`requestExit` 的 `exposure == 0` 要求自动实现：
-    ///      **派单到结算之间求解者无法提取保证金**（第三轮复核 M-2）。
-    /// @notice 维护求解者白名单（仅部署者/运营方）。RT-15。
+    /// @notice **On-chain dispatch** (docs/20): claim a batch after close and before the deadline, and lock that batch's exposure.
+    /// @dev Dispatch happens before settlement, when the chain does not yet know the clearing price or volume, so each batch locks a conservative, predictable amount:
+    ///      `maxSingleOrderSize(solverId)` (= bond x 5%); `maxTotalExposure` (x 50%) naturally caps in-flight batches at 10.
+    ///      The lock takes effect automatically through the `exposure == 0` requirement in `SolverRegistry.withdrawBond`/`requestExit`:
+    ///      **Between dispatch and settlement, a solver cannot withdraw bond** (third-round review M-2).
+    /// @notice Maintain the solver allowlist (deployer/operator only). RT-15.
     function setSolverAllowed(address solver, bool allowed) external {
         if (msg.sender != deployer) revert Errors.NotDeployer();
         if (solver == address(0)) revert Errors.InvalidOrder();
@@ -148,10 +148,10 @@ contract Settlement {
         if (block.number > orderBook.epochDeadlineBlock(epoch)) revert Errors.EpochClosed();
         if (dispatchedSolver[epoch] != address(0)) revert Errors.AlreadySet();
         if (solver == address(0)) revert Errors.InvalidOrder();
-        // 第三轮补充复核 B：派单必须由**被派单者本人**发起，否则任何人可用零成本
-        // 耗尽他人敞口额度（拒绝服务）。第一版为协议自营求解者，故要求 msg.sender == solver。
+        // Third-round supplementary review B: dispatch must be initiated by the **dispatched solver themselves**, otherwise anyone could at zero cost
+        // drain someone else's exposure allowance (denial of service). The first version uses protocol-operated solvers, so msg.sender == solver is required.
         if (msg.sender != solver) revert Errors.NotOrderOwner();
-        // RT-15：白名单放行（默认拒绝）。运营方在部署后显式 `setSolverAllowed`。
+        // RT-15: allowlist admission (deny by default). The operator explicitly calls `setSolverAllowed` after deployment.
         if (!solverAllowed[solver]) revert Errors.NotRegistered();
 
         bytes32 solverId = solverRegistry.solverIdOf(solver);
@@ -164,7 +164,7 @@ contract Settlement {
         emit BatchDispatched(epoch, solver, hold);
     }
 
-    /// @notice **超时释放敞口**：越过批次截止高度且该批次未结算时，任何人可调用（用户照常走退款）。
+    /// @notice **Timeout exposure release**: anyone may call it once a batch is past its deadline height and unsettled (users still refund as normal).
     function releaseExpiredExposure(uint64 epoch) external {
         address solver = dispatchedSolver[epoch];
         if (solver == address(0)) revert Errors.NotRegistered();
@@ -179,23 +179,23 @@ contract Settlement {
         emit ExposureReleased(epoch, solver, hold);
     }
 
-    /// @notice 一次性绑定罚没控制器（D-4）。绑定后不可更改；未绑定则 `slashSolver` 不可用。
-    /// @dev `SolverRegistry.slash` 是 `onlySettlement`，所以"多签 + timelock"必须经结算合约转发。
-    ///      在此之前罚没在链上**没有任何可达路径**（`docs/19-签字建议单` §三 的 D-4 待办）。
+    /// @notice Bind the slash controller once (D-4). Immutable after binding; if unbound, `slashSolver` is unavailable.
+    /// @dev `SolverRegistry.slash` is `onlySettlement`, so "multisig + timelock" must go through the settlement contract.
+    ///      Before that, slashing has **no reachable path on-chain** (the D-4 TODO in `docs/19-sign-off-proposal` §3).
     function bindSlashController(address controller_) external {
         if (msg.sender != deployer) revert Errors.NotDeployer();
         if (controller_ == address(0)) revert Errors.InvalidOrder();
         if (slashController != address(0)) revert Errors.AlreadySet();
-        // 第 8 轮审计 H-01/L-03：控制器必须是**合约**（多签/timelock），不得绑定 EOA——
-        // 否则"多签 + 延时"会静默退化为单密钥控制。
+        // Audit round 8, H-01/L-03: the controller must be a **contract** (multisig/timelock) and must not be bound to an EOA —
+        // otherwise "multisig + delay" silently degrades to single-key control.
         if (controller_.code.length == 0) revert Errors.InvalidOrder();
         slashController = controller_;
         emit SlashControllerBound(controller_);
     }
 
-    /// @notice 罚没求解者（D-4：多签 + timelock 触发）。只有 `slashController` 可调用。
-    /// @dev 扣减上限由 `SolverRegistry.slash` 保证（最多扣完该求解者保证金，不追索风险池之外）。
-    ///      本函数**不自带延时**：延时由控制器在执行前保证（参考 `src/SlashTimelock.sol`）。
+    /// @notice Slash a solver (D-4: triggered by multisig + timelock). Only `slashController` may call it.
+    /// @dev The deduction cap is enforced by `SolverRegistry.slash` (at most the solver's whole bond; nothing is chased beyond the risk pool).
+    ///      This function carries **no delay of its own**: the delay is guaranteed by the controller before execution (see `src/SlashTimelock.sol`).
     function slashSolver(bytes32 solverId, uint256 amount, bytes32 reason) external nonReentrant {
         if (msg.sender != slashController) revert Errors.NotSlashController();
         if (address(solverRegistry) == address(0)) revert Errors.NotRegistered();
@@ -203,12 +203,12 @@ contract Settlement {
         emit SolverSlashed(solverId, amount, reason);
     }
 
-    // ------------------------------------------------------------ 摘要
+    // ------------------------------------------------------------ Digest
 
-    /// @notice 结算摘要：绑定链 ID、结算合约地址与**具体成交明细**，防跨链重放与"换分配"。
-    /// @dev `06` 第六节要求摘要绑定链与合约；2026-09-25 追加 `keccak256(abi.encode(fills))`：
-    ///      在此之前，同一份回执可在"最大余数解集"内换成另一份分配（每单差异 ≤1 最小单位），
-    ///      验证者签的就不是"这一份分配"。见 docs/17 中-2 与 docs/05 第二十七节。
+    /// @notice Settlement digest: binds the chain ID, the settlement contract address, and the **specific fills**, preventing cross-chain replay and "allocation swaps".
+    /// @dev `06` §6 requires the digest to bind chain and contract; on 2026-09-25, `keccak256(abi.encode(fills))` was added:
+    ///      before that, the same receipt could be swapped for a different allocation within the "maximum-remainder solution set" (differing by ≤1 smallest unit per order),
+    ///      so verifiers were not signing "this exact allocation". See docs/17 M-2 and docs/05 §27.
     function settlementDigestOf(BatchSettlement calldata batch) public view returns (bytes32) {
         return keccak256(
             abi.encode(
@@ -233,7 +233,7 @@ contract Settlement {
         return _consumedDigest[digest];
     }
 
-    /// @notice 该摘要被消费时所在的纪元（未消费过为 0）。跨 epoch 锚定校验用（RT-4）。
+    /// @notice The epoch in which this digest was consumed (0 if never consumed). Used for cross-epoch anchoring checks (RT-4).
     function epochOfDigest(bytes32 digest) external view returns (uint64) {
         return _digestEpoch[digest];
     }
@@ -242,9 +242,9 @@ contract Settlement {
         return _epochSettled[epoch];
     }
 
-    // ------------------------------------------------------------ 结算
+    // ------------------------------------------------------------ Settlement
 
-    /// @notice 结算一个批次。任何人都可提交，只要回执有效且复算一致。
+    /// @notice Settle one batch. Anyone may submit, as long as the receipt is valid and recomputation matches.
     function settle(BatchSettlement calldata batch, bytes calldata attestation, bytes calldata matchProof)
         external
         nonReentrant
@@ -260,31 +260,31 @@ contract Settlement {
         if (batch.pairHash != keccak256(abi.encode(batch.baseToken, batch.quoteToken))) {
             revert Errors.InvalidOrder();
         }
-        // 载荷声明的结算窗口不得超过链上退款窗口（可自选更短窗口）。
-        // 空载荷（deadline=0）在此放行，交由验证器报结构错误（OrderSetMismatch），保持错误码语义。
+        // The settlement window declared in the payload must not exceed the on-chain refund window (a shorter window may be chosen).
+        // An empty payload (deadline=0) is let through here and left for the verifier to report a structural error (OrderSetMismatch), keeping error-code semantics intact.
         if (batch.deadline > orderBook.epochDeadlineBlock(batch.epoch)) revert Errors.InvalidOrder();
 
-        // 撮合有效性：绑定校验 → 复算清算价 → 与载荷比对 → 成交量上下界 → 分配校验
-        // （含逐笔限价与两侧守恒）。这些校验都需要订单内容，因此住在按档位实现的验证器里；
-        // 结算层不读订单内容，只消费它复算出的成交量（docs/09 第二节与 §3.1）。
+        // Match validity: binding checks -> recompute clearing price -> compare with payload -> volume bounds -> allocation checks
+        // (including per-fill limit prices and two-sided conservation). These checks all need order contents, so they live in the per-tier verifier;
+        // the settlement layer reads no order contents and only consumes the volume it recomputes (docs/09 §2 and §3.1).
         uint256 volume = matchVerifier.verifyMatch(batch, matchProof);
 
-        // 结算窗口（第三轮补充复核 C：与档位无关）。放在验证器之后：结构类/揭示类错误由各档验证器
-        // 先报（OrderSetMismatch / RevealExpired），越窗才报 EpochClosed——既有错误码口径不变。
+        // Settlement window (third-round supplementary review C: tier-independent). Placed after the verifier: structural/reveal errors are reported
+        // first by each tier's verifier (OrderSetMismatch / RevealExpired), and only an out-of-window case reports EpochClosed — existing error-code wording unchanged.
         if (block.number > batch.deadline) revert Errors.EpochClosed();
-        // 逐单有效期（RT-16 语义 B，2026-09-27）：**过期订单不参与撮合**——它仍留在封盘集合里
-        // （集合绑定与集合哈希都不变），但一旦出现成交即拒绝。该规则住在各档验证器里，因为它需要
-        // 与 fills 的对齐关系（O(n+f)）；在结算层逐单反查 fills 是 O(n·f)，200 单下要多花几 M gas。
-        //   公开档：`PlaintextMatchVerifier._verifyFills`（对齐时校验）+ `_scan` 跳过过期单；
-        //   密封档：`SealedMatchVerifier._verifyAllocation`（对齐时校验）。
-        // 新增档位必须回答同一个问题（接口注释不变）。
+        // Per-order validity (RT-16 semantics B, 2026-09-27): **expired orders do not take part in matching** — they stay in the closed set
+        // (set binding and set hash unchanged), but any fill involving one is rejected. This rule lives in each tier's verifier because it needs
+        // the alignment with fills (O(n+f)); looking up fills per order in the settlement layer would be O(n·f) and cost several M extra gas at 200 orders.
+        //   Plaintext tier: `PlaintextMatchVerifier._verifyFills` (checks during alignment) + `_scan` skips expired orders;
+        //   Sealed tier: `SealedMatchVerifier._verifyAllocation` (checks during alignment).
+        // New tiers must answer the same question (interface comments unchanged).
 
-        // 求解者风控门槛（审计 M-2 与第二轮 N-1/N-2）：
-        //   ① 未绑定注册表 → **拒绝**（原先静默跳过，等于门槛消失；本地演练可用 setRegistryRequired(false) 放开）
-        //   ② 已注册 + 保证金 ≥ minBond
-        //   ③ **敞口下界约束**：单批名义额不得超过单笔上限、不得超过可用保证金、计入后不得超过总敞口上限
-        // 完整的敞口窗口记账（open/closeExposure）仍属"派单"步骤（D-4 已确认），
-        // 但这里的下界约束保证"保证金至少覆盖单批名义额"，不再是一张入场券。
+        // Solver risk gate (audit M-2 and round-2 N-1/N-2):
+        //   (1) Registry unbound -> **reject** (it used to be silently skipped, which made the gate vanish; local drills can open it with setRegistryRequired(false))
+        //   (2) Registered + bond ≥ minBond
+        //   (3) **Exposure lower-bound constraint**: a single batch's notional must not exceed the per-order cap, must not exceed available bond, and must not push total exposure past the cap once counted
+        // Full exposure-window bookkeeping (open/closeExposure) still belongs to the "dispatch" step (confirmed in D-4),
+        // but the lower-bound constraint here guarantees "bond covers at least the single-batch notional", so it is no longer just an entry ticket.
         // An emergency allowlist revocation must fence an already-dispatched
         // solver at final settlement, not only at initial dispatch. Expired
         // exposure release and user refund are still independently available.
@@ -296,10 +296,10 @@ contract Settlement {
         }
         if (_registryRequired && address(solverRegistry) == address(0)) revert Errors.NotRegistered();
         if (address(solverRegistry) != address(0)) {
-            // `notionalQuote` 和 registry 的 bond/exposure 都必须是同一资产单位；在没有
-            // 经过审计的价格预言机前，跨资产比较会给出没有经济意义的风险上限。
+            // `notionalQuote` and the registry's bond/exposure must all be in the same asset unit; without
+            // a reviewed price oracle, cross-asset comparison would produce a risk cap with no economic meaning.
             if (batch.quoteToken != address(solverRegistry.bondToken())) revert Errors.SolverBondTokenMismatch();
-            // M-2/M-3（docs/20）：必须由**本批次被派单的求解者**结算
+            // M-2/M-3 (docs/20): settlement must come from the **solver dispatched for this batch**
             if (dispatchedSolver[batch.epoch] != batch.solver) revert Errors.NotRegistered();
             bytes32 solverId = solverRegistry.solverIdOf(batch.solver);
             if (solverId == bytes32(0) || !solverRegistry.isRegistered(solverId)) {
@@ -312,10 +312,10 @@ contract Settlement {
             if (notionalQuote > solverRegistry.maxSingleOrderSize(solverId)) {
                 revert Errors.SolverExposureExceeded();
             }
-            // RT-2（红队 freeze-1）：本批在 `dispatch` 时已 `openExposure(hold)`，hold 已计入总敞口；
-            // 这里若再按"敞口 + 本批名义额"检查，本批预留会被算两次——在合法配置
-            // `singleOrderBps == totalExposureBps` 下永远结不了算，出厂参数下第 10 个并发批次也结不了。
-            // 正确口径：把本批自己的预留从已用敞口中剔除，再核对"其余敞口 + 本批名义额 ≤ 总上限"。
+            // RT-2 (red-team freeze-1): this batch already called `openExposure(hold)` at `dispatch`, and the hold is counted in total exposure;
+            // checking "exposure + this batch's notional" again here would count this batch's reservation twice — under a valid configuration
+            // with `singleOrderBps == totalExposureBps`, settlement would never succeed, and under factory parameters the 10th concurrent batch could not settle either.
+            // Correct approach: exclude this batch's own reservation from used exposure, then check "other exposure + this batch's notional ≤ total cap".
             uint256 cap = solverRegistry.maxTotalExposure(solverId);
             uint256 used = solverRegistry.exposure(solverId);
             uint256 hold = dispatchHold[batch.epoch];
@@ -331,7 +331,7 @@ contract Settlement {
 
         _applyFills(batch, volume);
 
-        // 结算成功：关闭派单时锁定的敞口（若已绑定注册表）
+        // Settlement succeeded: close the exposure locked at dispatch (if a registry is bound)
         if (address(solverRegistry) != address(0)) {
             bytes32 solverId = solverRegistry.solverIdOf(batch.solver);
             uint256 hold = dispatchHold[batch.epoch];
@@ -351,19 +351,19 @@ contract Settlement {
         );
     }
 
-    /// @notice 退款入口。与用户自助退款共用 OrderBook 的同一段逻辑与状态守卫，两条路径互斥。
+    /// @notice Refund entry point. Shares the same OrderBook logic and state guards as user self-service refunds; the two paths are mutually exclusive.
     function refund(bytes32 orderId) external nonReentrant {
         orderBook.refundOnSettlement(orderId, msg.sender);
         emit Refunded(orderId);
     }
 
-    // ------------------------------------------------------------ 内部
+    // ------------------------------------------------------------ Internal
 
-    /// @dev 落账（docs/09 §3.3 第 8 步）：把成交明细按封盘顺序映射成数组，一次批量交给 OrderBook。
-    ///      原先在这里做的逐笔限价校验与两侧守恒**需要订单内容**（方向 + 限价），已随
-    ///      `_verifyAllocation` 一起搬进 `PlaintextMatchVerifier`；`volume` 由
-    ///      `matchVerifier.verifyMatch` 复算并返回（接口按 §3.1 保留该返回值），此处只做落账，
-    ///      因此结算层不需要读订单内容——这也是验收判据 3 的机械化前提。
+    /// @dev Posting (docs/09 §3.3, step 8): map the fills into an array in close order and hand them to OrderBook in one bulk call.
+    ///      The per-fill limit-price checks and two-sided conservation that used to live here **need order contents** (direction + limit price) and have moved
+    ///      into `PlaintextMatchVerifier` along with `_verifyAllocation`; `volume` is
+    ///      recomputed and returned by `matchVerifier.verifyMatch` (the interface keeps that return value per §3.1). This function only posts,
+    ///      so the settlement layer never needs to read order contents — which is also the mechanical prerequisite for acceptance criterion 3.
     function _applyFills(
         BatchSettlement calldata batch,
         uint256 /* volume */
@@ -376,7 +376,7 @@ contract Settlement {
         uint256 f;
 
         for (uint256 i = 0; i < n && f < batch.fills.length; i++) {
-            if (batch.fills[f].orderId != batch.orderIds[i]) continue; // 未成交订单
+            if (batch.fills[f].orderId != batch.orderIds[i]) continue; // Unfilled order
             filledIds[f] = batch.fills[f].orderId;
             filledSolds[f] = batch.fills[f].amountSold;
             f++;

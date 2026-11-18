@@ -7,27 +7,27 @@ import { RiskParams } from "./libraries/Params.sol";
 import { SafeTransfer } from "./libraries/SafeTransfer.sol";
 
 /// @title SolverRegistry
-/// @notice 求解者注册、保证金、敞口与罚没。
-/// @dev 本批新钉死的接口与公式（见 docs/05 第七节）：
-///      - `solverId = keccak256(abi.encode(operator))`，一个运营地址对应一个求解者；
-///      - 单笔上限 = 保证金 × 5%（500 bps）；总敞口上限 = 保证金 × 50%（5000 bps）；
-///      - 提取后保证金不得低于下限，且存在未结算敞口时一律不可提取；
-///      - `settlement` 是唯一可变更敞口与执行罚没的角色（占位，待权限模型冻结）；
-///      - 罚没金转入 `riskPool`（挑战者分成的部分待 P1-3 冻结）；
-///      - 单笔/总敞口比例与最低保证金是**部署期参数**（`RiskParams.Config`，带上下界与
-///        单笔 ≤ 总敞口的交叉不变量），第一版决策值（5% / 50%）不变；登记见 `docs/31`；
-///      - **扩容阶梯**（`docs/31` C 组）：连续 `UPGRADE_WINDOW_BLOCKS` 块无罚没即把单笔/总敞口
-///        上限乘 `UPGRADE_MULTIPLIER_BPS`；默认窗口 0 = **关闭**（既有部署行为不变）。
+/// @notice Solver registration, bonds, exposure, and slashing.
+/// @dev Newly frozen interfaces and formulas in this batch (see docs/05 §7):
+///      - `solverId = keccak256(abi.encode(operator))`: one operator address maps to one solver;
+///      - Per-order cap = bond x 5% (500 bps); total exposure cap = bond x 50% (5000 bps);
+///      - Bond must not fall below the floor after withdrawal, and no withdrawal at all while unsettled exposure exists;
+///      - `settlement` is the only role that can change exposure and execute slashing (placeholder until the permission model is frozen);
+///      - Slashed funds go to the `riskPool` (the challenger's share is pending freeze in P1-3);
+///      - The per-order/total exposure ratios and minimum bond are **deploy-time parameters** (`RiskParams.Config`, with bounds and
+///        the cross-invariant per-order ≤ total exposure); the first version's decided values (5% / 50%) are unchanged; see `docs/31` for registration;
+///      - **Capacity ladder** (`docs/31` group C): after `UPGRADE_WINDOW_BLOCKS` consecutive blocks with no slashing, the per-order/total exposure
+///        caps are multiplied by `UPGRADE_MULTIPLIER_BPS`; the default window of 0 = **off** (existing deployments behave unchanged).
 contract SolverRegistry {
     using SafeTransfer for IERC20;
 
-    /// @notice 单笔上限比例（bps）。部署期参数；第一版决策值 500（5%）。
+    /// @notice Per-order cap ratio (bps). Deploy-time parameter; first version's decided value is 500 (5%).
     uint256 public immutable MAX_SINGLE_ORDER_BPS;
-    /// @notice 总敞口上限比例（bps）。部署期参数；第一版决策值 5,000（50%）。
+    /// @notice Total exposure cap ratio (bps). Deploy-time parameter; first version's decided value is 5,000 (50%).
     uint256 public immutable MAX_TOTAL_EXPOSURE_BPS;
-    /// @notice 扩容阶梯窗口（区块）；0 = 关闭（默认）。
+    /// @notice Capacity-ladder window (blocks); 0 = off (default).
     uint256 public immutable UPGRADE_WINDOW_BLOCKS;
-    /// @notice 扩容后的限额倍数（bps）；10,000 = 不提额。
+    /// @notice Cap multiplier after the ladder upgrade (bps); 10,000 = no increase.
     uint256 public immutable UPGRADE_MULTIPLIER_BPS;
     uint256 public immutable GLOBAL_EXPOSURE_CAP;
     uint256 public immutable MAX_CONCURRENT_OPEN_EPOCHS;
@@ -37,11 +37,11 @@ contract SolverRegistry {
     address public immutable settlement;
     address public immutable riskPool;
     uint256 public immutable minBond;
-    /// @notice 部署者：仅用于一次性绑定 SLA 罚没方（与 `CommitteeRegistry.bindSlasher` 同形）。
+    /// @notice Deployer: used only to bind the SLA slasher once (same shape as `CommitteeRegistry.bindSlasher`).
     address public immutable deployer;
-    /// @notice SLA 罚没方（可选；未绑定 = `slashBySla` 不可用）。一次性绑定，不可更换。
-    /// @dev 口径见 `docs/39` §六 第 3 步与 `docs/41` 签字单：SLA 违约需要一条**独立于结算**的罚没通道；
-    ///      未绑定/未接线时链上行为与之前完全一致（没有任何新资金路径被打开）。
+    /// @notice SLA slasher (optional; unbound = `slashBySla` unavailable). Bound once, not replaceable.
+    /// @dev Wording in `docs/39` §6, step 3, and the `docs/41` sign-off: an SLA breach needs a slashing channel **independent of settlement**;
+    ///      when unbound/unwired, on-chain behavior is exactly as before (no new funds path is opened).
     address public slaSlasher;
 
     struct Solver {
@@ -50,7 +50,7 @@ contract SolverRegistry {
         uint256 exposure;
         bool registered;
         bool exitRequested;
-        /// @dev 最近一次"清白起点"：注册时记为当块，**每次实际罚没清零重算**（扩容阶梯的判据）。
+        /// @dev Most recent "clean start": recorded as the current block at registration, and **reset on every actual slash** (the capacity-ladder criterion).
         uint256 cleanSinceBlock;
     }
 
@@ -90,7 +90,7 @@ contract SolverRegistry {
         _;
     }
 
-    /// @notice 部署期参数校验与落地（越界在构造期 revert，见 `RiskParams.validate`）。
+    /// @notice Deploy-time parameter validation and storage (out-of-range values revert at construction, see `RiskParams.validate`).
     constructor(IERC20 bondToken_, address settlement_, address riskPool_, RiskParams.Config memory params_) {
         if (address(bondToken_) == address(0) || settlement_ == address(0) || riskPool_ == address(0)) {
             revert Errors.InvalidOrder();
@@ -109,7 +109,7 @@ contract SolverRegistry {
         deployer = msg.sender;
     }
 
-    /// @notice 当前生效的部署期风险参数（运维/监控/审计从这里读，docs/31 第十节-5）。
+    /// @notice The currently active deploy-time risk parameters (operators, monitors, and reviewers read them here, docs/31 §10-5).
     function params() external view returns (RiskParams.Config memory) {
         return RiskParams.Config({
             minBond: minBond,
@@ -122,9 +122,9 @@ contract SolverRegistry {
         });
     }
 
-    // ------------------------------------------------------------ 注册与保证金
+    // ------------------------------------------------------------ Registration and bonds
 
-    /// @notice 注册求解者并缴纳初始保证金。`solverId` 由调用者地址派生。
+    /// @notice Register a solver and post the initial bond. `solverId` is derived from the caller's address.
     function register(bytes32 pubKey, uint256 bond) external nonReentrant {
         if (solverIdOf[msg.sender] != bytes32(0)) revert Errors.AlreadyRegistered();
         if (bond < minBond) revert Errors.SolverBondInsufficient();
@@ -144,7 +144,7 @@ contract SolverRegistry {
         emit SolverRegistered(solverId, msg.sender, pubKey, bond);
     }
 
-    /// @notice 追加保证金。
+    /// @notice Top up bond.
     function depositBond(uint256 amount) external nonReentrant {
         bytes32 solverId = _requireSolver(msg.sender);
         if (amount == 0) revert Errors.InvalidOrder();
@@ -154,7 +154,7 @@ contract SolverRegistry {
         emit BondDeposited(solverId, amount);
     }
 
-    /// @notice 申请退出。存在未结算敞口时不得申请。
+    /// @notice Request exit. Not allowed while unsettled exposure exists.
     function requestExit() external {
         bytes32 solverId = _requireSolver(msg.sender);
         if (_solvers[solverId].exposure != 0) revert Errors.SolverExposureExceeded();
@@ -163,7 +163,7 @@ contract SolverRegistry {
         emit ExitRequested(solverId);
     }
 
-    /// @notice 提取保证金。硬约束：无未结算敞口、已申请退出、提取后不低于下限。
+    /// @notice Withdraw bond. Hard constraints: no unsettled exposure, exit requested, and bond stays at or above the floor after withdrawal.
     function withdrawBond(uint256 amount) external nonReentrant {
         bytes32 solverId = _requireSolver(msg.sender);
         Solver storage solver = _solvers[solverId];
@@ -186,9 +186,9 @@ contract SolverRegistry {
         emit BondWithdrawn(solverId, amount);
     }
 
-    // ------------------------------------------------------------ 敞口与罚没
+    // ------------------------------------------------------------ Exposure and slashing
 
-    /// @notice 开立敞口。仅结算合约可调用；同时校验单笔上限与总敞口上限。
+    /// @notice Open exposure. Settlement contract only; checks both the per-order cap and the total exposure cap.
     function openExposure(bytes32 solverId, uint256 amount) external onlySettlement {
         _openExposure(solverId, amount);
     }
@@ -197,8 +197,8 @@ contract SolverRegistry {
         _openExposure(solverId, amount);
         if (_globalReservation[epoch] != bytes32(0)) revert Errors.GlobalReservationMismatch();
         if (globalOpenEpochs >= MAX_CONCURRENT_OPEN_EPOCHS) revert Errors.GlobalConcurrentEpochLimit();
-        // 先比较再相减：即使错误的存储状态让已用额度高于 cap，也要 fail-closed，
-        // 而不是在减法处触发无语义的 panic。
+        // Compare before subtracting: even if a corrupt stored state puts used allowance above the cap, fail closed
+        // instead of triggering a meaningless panic at the subtraction.
         if (globalExposure > GLOBAL_EXPOSURE_CAP || amount > GLOBAL_EXPOSURE_CAP - globalExposure) {
             revert Errors.GlobalExposureExceeded();
         }
@@ -221,7 +221,7 @@ contract SolverRegistry {
         emit ExposureOpened(solverId, amount, total);
     }
 
-    /// @notice 结清敞口。仅结算合约可调用。
+    /// @notice Close exposure. Settlement contract only.
     function closeExposure(bytes32 solverId, uint256 amount) external onlySettlement {
         _closeExposure(solverId, amount);
     }
@@ -248,12 +248,12 @@ contract SolverRegistry {
         return _globalReservation[epoch];
     }
 
-    /// @notice 罚没。仅结算合约可调用；罚没金转入风险池。
+    /// @notice Slash. Settlement contract only; slashed funds go to the risk pool.
     function slash(bytes32 solverId, uint256 amount, bytes32 reason) external onlySettlement nonReentrant {
         _applySlash(solverId, amount, reason);
     }
 
-    /// @notice 一次性绑定 SLA 罚没方（部署者调用；不可更换、不可解绑）。
+    /// @notice Bind the SLA slasher once (called by the deployer; not replaceable, not unbindable).
     function bindSlaSlasher(address slaSlasher_) external {
         if (msg.sender != deployer) revert Errors.NotDeployer();
         if (slaSlasher != address(0)) revert Errors.AlreadySet();
@@ -262,9 +262,9 @@ contract SolverRegistry {
         emit SlaSlasherBound(slaSlasher_);
     }
 
-    /// @notice **SLA 违约罚没**（与结算路径并列的第二条通道）：只有绑定的 SLA 罚没方可调用。
-    /// @dev 与 `slash` 共用同一份封顶/清零逻辑；金额与触发条件由链下 SLA 判定给出
-    ///      （`tools/solver/sla_bond.py`，默认关闭），链上只保证"不罚出余额 + 清零清白起点"。
+    /// @notice **SLA-breach slashing** (the second channel, alongside the settlement path): only the bound SLA slasher may call it.
+    /// @dev Shares the cap/reset logic with `slash`; the amount and trigger come from the off-chain SLA decision
+    ///      (`tools/solver/sla_bond.py`, off by default); on-chain it only guarantees "never slash beyond the balance + reset the clean start".
     function slashBySla(bytes32 solverId, uint256 amount, bytes32 reason) external onlySlaSlasher nonReentrant {
         _applySlash(solverId, amount, reason);
     }
@@ -274,7 +274,7 @@ contract SolverRegistry {
         _;
     }
 
-    /// @dev 罚没的共用实现：按余额封顶、清零扩容阶梯的"清白起点"、罚没金进风险池。
+    /// @dev Shared slash implementation: capped by balance, resets the capacity ladder's "clean start", slashed funds go to the risk pool.
     function _applySlash(bytes32 solverId, uint256 amount, bytes32 reason) private {
         Solver storage solver = _solvers[solverId];
         if (!solver.registered) revert Errors.NotRegistered();
@@ -283,7 +283,7 @@ contract SolverRegistry {
         solver.bond -= penalty;
 
         if (penalty != 0) {
-            // 扩容阶梯：任何一次实际罚没都把"清白起点"清零重算
+            // Capacity ladder: any actual slash resets the "clean start".
             solver.cleanSinceBlock = block.number;
             emit CleanStreakReset(solverId, block.number);
             bondToken.safeTransferExact(riskPool, penalty);
@@ -291,19 +291,19 @@ contract SolverRegistry {
         emit Slashed(solverId, penalty, reason);
     }
 
-    // ------------------------------------------------------------ 查询
+    // ------------------------------------------------------------ Queries
 
-    /// @notice 当前敞口。
+    /// @notice Current exposure.
     function exposure(bytes32 solverId) external view returns (uint256) {
         return _solvers[solverId].exposure;
     }
 
-    /// @notice 保证金余额。
+    /// @notice Bond balance.
     function bondOf(bytes32 solverId) external view returns (uint256) {
         return _solvers[solverId].bond;
     }
 
-    /// @notice 是否已满扩容窗口（连续无罚没）。窗口为 0（关闭）时恒为 false。
+    /// @notice Whether the capacity-ladder window is complete (no slashing in a row). Always false when the window is 0 (off).
     function upgradeEligible(bytes32 solverId) public view returns (bool) {
         if (UPGRADE_WINDOW_BLOCKS == 0) return false;
         Solver storage solver = _solvers[solverId];
@@ -311,27 +311,27 @@ contract SolverRegistry {
         return block.number >= solver.cleanSinceBlock + UPGRADE_WINDOW_BLOCKS;
     }
 
-    /// @notice 当前适用的限额倍数（bps）：满窗口 → `UPGRADE_MULTIPLIER_BPS`，否则 10,000。
+    /// @notice Currently applicable cap multiplier (bps): window complete -> `UPGRADE_MULTIPLIER_BPS`, otherwise 10,000.
     function riskMultiplierBps(bytes32 solverId) public view returns (uint256) {
         return upgradeEligible(solverId) ? UPGRADE_MULTIPLIER_BPS : BPS_DENOMINATOR;
     }
 
-    /// @notice 单笔订单上限 = 保证金 × 单笔比例 ×（满扩容窗口时的倍数）。
+    /// @notice Per-order cap = bond x per-order ratio x (multiplier when the capacity window is complete).
     function maxSingleOrderSize(bytes32 solverId) public view returns (uint256) {
-        // 自审 F1：先除后乘，避免 `bond × bps × 倍数` 三连乘把中间值顶到溢出（保证金无上限，
-        // `depositBond` 也不设上限）。倍数关闭时（10,000）结果与旧式**逐位一致**；
-        // 开启且倍数非 2.0× 时可能比旧式少 1 个最小单位（更保守的方向）。
+        // Self-review F1: divide before multiplying, so `bond × bps × multiplier` cannot overflow an intermediate value (bond has no cap,
+        // and neither does `depositBond`). With the multiplier off (10,000), the result is **bit-for-bit identical** to the old formula;
+        // when on with a multiplier other than 2.0x, it may be 1 smallest unit lower than the old formula (the more conservative direction).
         uint256 base = _solvers[solverId].bond * MAX_SINGLE_ORDER_BPS / BPS_DENOMINATOR;
         return base * riskMultiplierBps(solverId) / BPS_DENOMINATOR;
     }
 
-    /// @notice 总敞口上限 = 保证金 × 总敞口比例 ×（满扩容窗口时的倍数）。
+    /// @notice Total exposure cap = bond x total exposure ratio x (multiplier when the capacity window is complete).
     function maxTotalExposure(bytes32 solverId) public view returns (uint256) {
         uint256 base = _solvers[solverId].bond * MAX_TOTAL_EXPOSURE_BPS / BPS_DENOMINATOR;
         return base * riskMultiplierBps(solverId) / BPS_DENOMINATOR;
     }
 
-    /// @notice 还可承接的敞口额度。
+    /// @notice Remaining exposure capacity.
     function availableBond(bytes32 solverId) external view returns (uint256) {
         uint256 cap = maxTotalExposure(solverId);
         uint256 used = _solvers[solverId].exposure;
@@ -342,7 +342,7 @@ contract SolverRegistry {
         return _solvers[solverId].registered;
     }
 
-    // ------------------------------------------------------------ 内部
+    // ------------------------------------------------------------ Internal
 
     function _requireSolver(address operator) private view returns (bytes32 solverId) {
         solverId = solverIdOf[operator];
