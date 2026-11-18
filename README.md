@@ -52,9 +52,9 @@ executed against this snapshot during preparation, and each is marked
 ## Quick start
 
 ```bash
-# 未复核：目标仓库尚未推送，地址待确认
-git clone https://github.com/dfrchain/dfrchain.git
-cd dfrchain/bex-core
+# 克隆本仓库（未复核：命令未实际执行验证）
+git clone https://github.com/dfrchain/bex.git
+cd bex/bex-core
 
 # 未复核：fetch the submodule dependencies (forge-std, halmos-cheatcodes)
 git submodule update --init --recursive

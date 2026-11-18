@@ -15,9 +15,9 @@ preparation; each is marked 未实测 (not verified by running it here).
 ## Clone, build, test
 
 ```bash
-# 未实测：目标仓库尚未推送，地址待确认
-git clone https://github.com/dfrchain/dfrchain.git
-cd dfrchain/bex-core
+# 克隆本仓库（未实测：命令未实际执行验证）
+git clone https://github.com/dfrchain/bex.git
+cd bex/bex-core
 
 # 未实测：fetch the submodule dependencies (forge-std, halmos-cheatcodes)
 git submodule update --init --recursive
