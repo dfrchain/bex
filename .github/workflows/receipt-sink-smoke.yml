@@ -1,0 +1,41 @@
+name: BEX public receipt-sink smoke
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "bex-core/src/PaymentReceiptSink.sol"
+      - "bex-core/src/interfaces/IERC20.sol"
+      - "bex-core/src/libraries/SafeTransfer.sol"
+      - "bex-core/src/libraries/ReceiptChainDomain.sol"
+      - "bex-core/src/mocks/MockERC20.sol"
+      - "bex-core/examples/receipt-sink/**"
+      - ".github/workflows/receipt-sink-smoke.yml"
+  pull_request:
+    paths:
+      - "bex-core/src/PaymentReceiptSink.sol"
+      - "bex-core/src/interfaces/IERC20.sol"
+      - "bex-core/src/libraries/SafeTransfer.sol"
+      - "bex-core/src/libraries/ReceiptChainDomain.sol"
+      - "bex-core/src/mocks/MockERC20.sol"
+      - "bex-core/examples/receipt-sink/**"
+      - ".github/workflows/receipt-sink-smoke.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  isolated-receipt-sink:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout public repo
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+      - name: Verify independently buildable receipt-sink subset
+        run: bash bex-core/examples/receipt-sink/run.sh
