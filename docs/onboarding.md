@@ -1,6 +1,6 @@
 # Onboarding
 
-> This guide explains how to get the BEX code, build and test it locally, and run a minimal integration example. All commands are taken from the source repository's docs; none were actually run against this snapshot (marked "not verified by running it here").
+> This guide explains the published BEX source excerpt and an illustrative local workflow. The excerpt currently lacks helper libraries required to build all contracts, so full build and test commands below are not expected to pass until the public dependencies are completed. All commands are taken from the source repository's docs; none were actually run against this snapshot (marked "not verified by running it here").
 
 ## Prerequisites
 
@@ -78,8 +78,9 @@ To read the core flow, start with these files:
 BEX is currently deployed on the Base Sepolia and Arbitrum Sepolia testnets.
 
 **Can I run it locally?**
-Yes. Start Anvil and run `script/DeployReceiptLocal.s.sol` as shown above
-(not verified by running it here). It needs no remote services and no credentials.
+Not reliably from this excerpt alone. Missing shared helper-library imports
+may prevent compilation before the local Anvil demonstration can run.
+The commands are illustrative, not verified against this snapshot.
 
 **Does this repository contain all of the BEX code?**
 No. This repository publishes a subset of the contracts, interfaces, and
@@ -93,4 +94,6 @@ From `bex-core/`, run `forge test` (not verified by running it here). The guard 
 Open an issue at <https://github.com/dfrchain>.
 
 **What license is the code under?**
-Apache License 2.0. See [LICENSE](../LICENSE).
+The root repository includes Apache License 2.0 ([LICENSE](../LICENSE));
+some Solidity files identify MIT in their SPDX headers. Review licenses at
+the file level and see [the public-source boundary](../OPEN_SOURCE_BOUNDARY.md).
