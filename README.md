@@ -48,6 +48,29 @@ are **expected to be blocked by missing dependencies** until the public
 release is completed. Commands below are illustrative and were not executed
 for this snapshot. See [OPEN_SOURCE_BOUNDARY.md](OPEN_SOURCE_BOUNDARY.md).
 
+## Reproducible public receipt-sink slice
+
+The public `PaymentReceiptSink.sol` now has a minimal isolated Foundry build/test
+that does **not** require the unpublished helpers used by other contracts:
+
+```bash
+bash bex-core/examples/receipt-sink/run.sh
+```
+
+The script stages only the public receipt sink, its ERC-20 interface, test
+token, and two minimal public helper libraries into a separate temporary
+Foundry project. It tests exact payment receipts, duplicate prevention, and
+the asset allowlist. The isolated smoke gate is also configured in
+[GitHub Actions](.github/workflows/receipt-sink-smoke.yml).
+
+**Important:** `forge build` or `forge test` at the `bex-core/` root
+still requires the intentionally omitted dependencies of other protocol
+contracts. The minimal helper `SafeTransfer.sol` is only sufficient for
+the isolated receipt-sink target and is not the full private library.
+
+See [PUBLIC_RELEASE_REVIEW.md](PUBLIC_RELEASE_REVIEW.md) for the private/public
+baseline comparison and further-publication restrictions.
+
 ## Quick start
 
 ```bash
