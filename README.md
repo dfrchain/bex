@@ -9,8 +9,10 @@ Arbitrum Sepolia testnets.
 
 ```text
 .
-├── LICENSE                     Apache License 2.0
+├── LICENSE                     Apache License 2.0 (see file-level SPDX notices)
 ├── README.md
+├── OPEN_SOURCE_BOUNDARY.md      Published-vs-proprietary scope and release checklist
+├── SECURITY.md                  Private vulnerability reporting
 ├── docs/
 │   └── onboarding.md           Contributor onboarding guide
 ├── .gitignore
@@ -19,7 +21,7 @@ Arbitrum Sepolia testnets.
     ├── foundry.toml
     ├── src/
     │   ├── OrderBook.sol               Receives signed orders, locks funds, archives batches
-    │   ├── Settlement.sol              Verifies receipts, recomputes settlement, releases funds, refunds on timeout
+    │   ├── Settlement.sol              Verifies receipts and match-verifier results; settles or refunds
     │   ├── SolverRegistry.sol          Solver registration, bonds, exposure
     │   ├── AttestationVerifier.sol     Receipt verification
     │   ├── CanonicalReceiptRegistry.sol Registry of canonical receipts
@@ -39,13 +41,12 @@ Arbitrum Sepolia testnets.
 
 ## Scope note
 
-This repository is a source excerpt: it publishes a subset of the BEX
-contracts, interfaces, and tests. The included contracts import shared helper
-libraries that are intentionally not part of this excerpt, so this snapshot on
-its own is not a standalone buildable package as-is. All commands below are
-taken from the source repository's own documentation. None of them were
-executed against this snapshot during preparation, and each is marked
-(not verified).
+This repository is a **partial source excerpt**, not a verified standalone
+build. Some imports (including shared helper libraries under
+`bex-core/src/libraries/`) are absent. Therefore `forge build` and `forge test`
+are **expected to be blocked by missing dependencies** until the public
+release is completed. Commands below are illustrative and were not executed
+for this snapshot. See [OPEN_SOURCE_BOUNDARY.md](OPEN_SOURCE_BOUNDARY.md).
 
 ## Quick start
 
@@ -99,4 +100,8 @@ forge test --match-path 'test/guards/*' -vv
 
 ## License
 
-Apache License 2.0. See [LICENSE](LICENSE).
+The root repository includes the Apache License 2.0 ([LICENSE](LICENSE)).
+Some Solidity source files carry their own `SPDX-License-Identifier: MIT`
+headers; check each file's license and third-party notices when reusing code.
+See [OPEN_SOURCE_BOUNDARY.md](OPEN_SOURCE_BOUNDARY.md) for scope and
+[SECURITY.md](SECURITY.md) for confidential reports.
